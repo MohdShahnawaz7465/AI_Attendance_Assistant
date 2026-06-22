@@ -1,3 +1,10 @@
+# 📸 Screenshots
+<img width="1920" height="1080" alt="Screenshot (128)" src="https://github.com/user-attachments/assets/c2cfcb43-079d-409c-9a61-ab18558b6e64" />
+<img width="1920" height="1080" alt="Screenshot (127)" src="https://github.com/user-attachments/assets/a389e9ff-e85d-443c-9fc7-63d5559d2c84" />
+<img width="1920" height="1080" alt="Screenshot (126)" src="https://github.com/user-attachments/assets/d4ed7ef6-9fa7-4542-80f4-4c2c314953d0" />
+<img width="1920" height="1080" alt="Screenshot (125)" src="https://github.com/user-attachments/assets/b53ea8da-0143-4669-bb02-d66218f7a320" />
+<img width="1920" height="1080" alt="Screenshot (124)" src="https://github.com/user-attachments/assets/a8bb73e6-fa41-4587-bee2-f0e8bbd49495" />
+<img width="1920" height="1080" alt="Screenshot (123)" src="https://github.com/user-attachments/assets/25531305-acfc-4588-80c6-7fbdd0ac8b3a" />
 # 🎓 AI Attendance Assistant
 
 An AI-powered attendance management system built using Flask, SQLite, and Groq AI. The application helps manage student attendance records, provides attendance analytics, supports AI-powered conversations, and generates intelligent attendance reports.
@@ -68,24 +75,6 @@ An AI-powered attendance management system built using Flask, SQLite, and Groq A
 * CSS
 * Groq API
 * Python Dotenv
-
----
-
-# 📸 Screenshots
-
-## Dashboard
-
-![Dashboard](screenshots/dashboard.png)
-
-## AI Chatbot
-
-![AI Chatbot](screenshots/chatbot.png)
-
-## AI Attendance Report
-
-![AI Report](screenshots/report.png)
-
----
 
 # 📦 Installation
 
