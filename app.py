@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 import sqlite3
+import os
 from groq_helper import ask_ai
 import pandas as pd
 from io import BytesIO
@@ -9,60 +10,95 @@ from reportlab.pdfgen import canvas
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from werkzeug.security import generate_password_hash, check_password_hash
 
+DB_PATH = "attendance.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS students(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        roll_no TEXT,
+        present_days INTEGER,
+        total_days INTEGER
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE,
+        password TEXT
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS email_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email_enabled INTEGER DEFAULT 0,
+        sender_email TEXT,
+        smtp_server TEXT,
+        smtp_port INTEGER
+    )
+    """)
+    # Create admin user if not exists (hashed password)
+    cursor.execute("SELECT * FROM users WHERE username=?", ("admin",))
+    if not cursor.fetchone():
+        hashed = generate_password_hash("admin123")
+        cursor.execute("INSERT INTO users (username, password) VALUES (?,?)", ("admin", hashed))
+    conn.commit()
+    conn.close()
+
+# Ensure DB exists on import/run
+init_db()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
-
 
 # Setup Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-
 # Chat history
 chat_history = []
-
 
 class User(UserMixin):
     def __init__(self, id, username):
         self.id = id
         self.username = username
 
-
 @login_manager.user_loader
 def load_user(user_id):
-    conn = sqlite3.connect("attendance.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+    cursor.execute("SELECT id, username FROM users WHERE id=?", (user_id,))
     user_data = cursor.fetchone()
     conn.close()
-    
     if user_data:
         return User(user_data[0], user_data[1])
     return None
 
-
 def send_email_alert(student_name, percentage, recipient_email="student@example.com"):
     """Send email alert when attendance drops below 75%"""
     try:
-        conn = sqlite3.connect("attendance.db")
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM email_settings WHERE id=1")
         settings = cursor.fetchone()
         conn.close()
-        
-        if settings and settings[1] == 1:  # email_enabled
+
+        if settings and settings[1] == 1: # email_enabled
             sender_email = settings[2]
             smtp_server = settings[3]
             smtp_port = settings[4]
-            
+
             msg = MIMEMultipart()
             msg['From'] = sender_email
             msg['To'] = recipient_email
-            msg['Subject'] = f'⚠️ Low Attendance Alert - {student_name}'
-            
+            msg['Subject'] = f'⚠ Low Attendance Alert - {student_name}'
+
             body = f"""
 Dear Student,
 
@@ -77,35 +113,34 @@ Best regards,
 AI Attendance System
 """
             msg.attach(MIMEText(body, 'plain'))
-            
+
             server = smtplib.SMTP(smtp_server, smtp_port)
             server.starttls()
             server.send_message(msg)
             server.quit()
-            
             return True
     except Exception as e:
         print(f"Email error: {e}")
         return False
     return False
 
-
 @app.route("/", methods=["GET", "POST"])
 @login_required
 def home():
-    conn = sqlite3.connect("attendance.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-
     cursor.execute("SELECT * FROM students")
     students = cursor.fetchall()
-
     conn.close()
 
     student_data = []
     low_attendance = []
 
     for student in students:
-        percentage = round((student[3] / student[4]) * 100, 2)
+        # protect division by zero
+        present = student[3] or 0
+        total = student[4] or 0
+        percentage = round((present / total) * 100, 2) if total > 0 else 0.0
 
         if percentage >= 90:
             status = "Excellent"
@@ -118,8 +153,8 @@ def home():
             "id": student[0],
             "name": student[1],
             "roll_no": student[2],
-            "present": student[3],
-            "total": student[4],
+            "present": present,
+            "total": total,
             "percentage": percentage,
             "status": status
         }
@@ -149,7 +184,7 @@ def home():
     if request.method == "POST":
 
         if "clear_students" in request.form:
-            conn = sqlite3.connect("attendance.db")
+            conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("DELETE FROM students")
             conn.commit()
@@ -158,7 +193,7 @@ def home():
 
         if "delete_name" in request.form:
             delete_student_name = request.form["delete_name"].strip()
-            conn = sqlite3.connect("attendance.db")
+            conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM students WHERE name=?", (delete_student_name,))
             existing_student = cursor.fetchone()
@@ -171,21 +206,28 @@ def home():
                 delete_message = f"Student '{delete_student_name}' not found."
 
             conn.close()
+            flash(delete_message, "info")
             return redirect(url_for("home"))
 
         if "new_name" in request.form:
             name = request.form["new_name"]
             roll = request.form["new_roll"]
+            try:
+                present_days = int(request.form.get("present_days", 0))
+                total_days = int(request.form.get("total_days", 0))
+            except ValueError:
+                present_days = 0
+                total_days = 0
 
-            conn = sqlite3.connect("attendance.db")
+            conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM students WHERE roll_no=?", (roll,))
             existing_student = cursor.fetchone()
 
             if existing_student is None:
                 cursor.execute(
-                    "INSERT INTO students (name, roll_no, present_days, total_days) VALUES (?, ?, ?, ?)",
-                    (name, roll, int(request.form["present_days"]), int(request.form["total_days"]))
+                    "INSERT INTO students (name, roll_no, present_days, total_days) VALUES (?,?,?,?)",
+                    (name, roll, present_days, total_days)
                 )
                 conn.commit()
 
@@ -194,17 +236,21 @@ def home():
 
         if "update_student" in request.form:
             student_id = request.form["update_id"]
-            present = int(request.form["update_present"])
-            total = int(request.form["update_total"])
+            try:
+                present = int(request.form["update_present"])
+                total = int(request.form["update_total"])
+            except ValueError:
+                present = 0
+                total = 0
 
-            conn = sqlite3.connect("attendance.db")
+            conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM students WHERE id=?", (student_id,))
             existing_student = cursor.fetchone()
 
             if existing_student is not None:
-                old_percentage = (existing_student[3] / existing_student[4]) * 100
-                new_percentage = (present / total) * 100
+                old_percentage = (existing_student[3] / existing_student[4]) * 100 if existing_student[4] > 0 else 0
+                new_percentage = (present / total) * 100 if total > 0 else 0
 
                 cursor.execute(
                     "UPDATE students SET present_days=?, total_days=? WHERE id=?",
@@ -213,7 +259,7 @@ def home():
                 conn.commit()
 
                 if new_percentage < 75 and old_percentage >= 75:
-                    send_email_alert(existing_student[1], new_percentage)
+                    send_email_alert(existing_student[1], round(new_percentage, 2))
                     update_message = f"Updated {existing_student[1]}'s attendance. Email alert sent!"
                 else:
                     update_message = f"Updated {existing_student[1]}'s attendance successfully!"
@@ -221,15 +267,19 @@ def home():
                 update_message = "Student not found."
 
             conn.close()
+            flash(update_message, "info")
             return redirect(url_for("home"))
 
         if "save_email_settings" in request.form:
             email_enabled = 1 if request.form.get("email_enabled") else 0
-            sender_email = request.form["sender_email"]
-            smtp_server = request.form["smtp_server"]
-            smtp_port = int(request.form["smtp_port"])
+            sender_email = request.form.get("sender_email", "")
+            smtp_server = request.form.get("smtp_server", "")
+            try:
+                smtp_port = int(request.form.get("smtp_port", 0))
+            except ValueError:
+                smtp_port = 0
 
-            conn = sqlite3.connect("attendance.db")
+            conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM email_settings WHERE id=1")
             existing = cursor.fetchone()
@@ -241,7 +291,7 @@ def home():
                 )
             else:
                 cursor.execute(
-                    "INSERT INTO email_settings (id, email_enabled, sender_email, smtp_server, smtp_port) VALUES (1, ?, ?, ?, ?)",
+                    "INSERT INTO email_settings (id, email_enabled, sender_email, smtp_server, smtp_port) VALUES (1,?,?,?,?)",
                     (email_enabled, sender_email, smtp_server, smtp_port)
                 )
             conn.commit()
@@ -252,18 +302,18 @@ def home():
 
         if "generate_report" in request.form:
             prompt = f"""
-            Create a professional attendance report.
+Create a professional attendance report.
 
-            Total Students: {total_students}
-            Highest Attendance: {highest_attendance['name']} - {highest_attendance['percentage']}%
-            Lowest Attendance: {lowest_attendance['name']} - {lowest_attendance['percentage']}%
-            Students Below 75%: {low_attendance}
+Total Students: {total_students}
+Highest Attendance: {highest_attendance['name']} - {highest_attendance['percentage']}%
+Lowest Attendance: {lowest_attendance['name']} - {lowest_attendance['percentage']}%
+Students Below 75%: {low_attendance}
 
-            Write:
-            1. Summary
-            2. Key Observations
-            3. Recommendations
-            """
+Write:
+1. Summary
+2. Key Observations
+3. Recommendations
+"""
             ai_report = ask_ai(prompt)
 
         if "question" in request.form:
@@ -276,7 +326,7 @@ def home():
                 response = f'{lowest_attendance["name"]} has the lowest attendance ({lowest_attendance["percentage"]}%)'
             elif "below 75" in question:
                 names = [f'{s["name"]} ({s["percentage"]}%)' for s in low_attendance]
-                response = ", ".join(names)
+                response = ", ".join(names) if names else "No students below 75%"
             elif "improved" in question or "most improved" in question:
                 if len(student_data) >= 2:
                     sorted_by_percentage = sorted(student_data, key=lambda x: x["percentage"], reverse=True)
@@ -288,18 +338,18 @@ def home():
                 response = f"The average attendance is {avg}%"
             elif "trend" in question or "pattern" in question:
                 response = ask_ai(f"""
-                Analyze attendance trends for: {student_data}
-                What patterns do you see?
-                """)
+Analyze attendance trends for: {student_data}
+What patterns do you see?
+""")
             else:
                 prompt = f"""
-                You are an AI Attendance Assistant.
+You are an AI Attendance Assistant.
 
-                Student Data: {student_data}
-                User Question: {question}
+Student Data: {student_data}
+User Question: {question}
 
-                Answer professionally.
-                """
+Answer professionally.
+"""
                 response = ask_ai(prompt)
 
         elif "student_search" in request.form:
@@ -311,7 +361,7 @@ def home():
             if search_result is None:
                 search_message = "Student not found."
 
-    conn = sqlite3.connect("attendance.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM email_settings WHERE id=1")
     email_settings = cursor.fetchone()
@@ -334,11 +384,10 @@ def home():
         email_settings=email_settings
     )
 
-
 @app.route("/export_excel")
 @login_required
 def export_excel():
-    conn = sqlite3.connect("attendance.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM students")
     students = cursor.fetchall()
@@ -346,13 +395,15 @@ def export_excel():
 
     student_data = []
     for student in students:
-        percentage = round((student[3] / student[4]) * 100, 2)
+        present = student[3] or 0
+        total = student[4] or 0
+        percentage = round((present / total) * 100, 2) if total > 0 else 0.0
         student_info = {
             "id": student[0],
             "name": student[1],
             "roll_no": student[2],
-            "present": student[3],
-            "total": student[4],
+            "present": present,
+            "total": total,
             "percentage": percentage,
             "status": "Excellent" if percentage >= 90 else "Good" if percentage >= 75 else "Warning"
         }
@@ -369,11 +420,10 @@ def export_excel():
         download_name="attendance_report.xlsx"
     )
 
-
 @app.route("/export_pdf")
 @login_required
 def export_pdf():
-    conn = sqlite3.connect("attendance.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM students")
     students = cursor.fetchall()
@@ -381,13 +431,15 @@ def export_pdf():
 
     student_data = []
     for student in students:
-        percentage = round((student[3] / student[4]) * 100, 2)
+        present = student[3] or 0
+        total = student[4] or 0
+        percentage = round((present / total) * 100, 2) if total > 0 else 0.0
         student_info = {
             "id": student[0],
             "name": student[1],
             "roll_no": student[2],
-            "present": student[3],
-            "total": student[4],
+            "present": present,
+            "total": total,
             "percentage": percentage,
             "status": "Excellent" if percentage >= 90 else "Good" if percentage >= 75 else "Warning"
         }
@@ -414,6 +466,10 @@ def export_pdf():
     y -= 25
     c.setFont("Helvetica", 12)
     for student in student_data:
+        if y < 50:
+            c.showPage()
+            y = 750
+            c.setFont("Helvetica", 12)
         c.drawString(100, y, f"{student['name']} - {student['percentage']}% ({student['status']})")
         y -= 18
     c.save()
@@ -425,20 +481,19 @@ def export_pdf():
         download_name="attendance_report.pdf"
     )
 
-
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
         username = request.form["username"]
         password = request.form["password"]
 
-        conn = sqlite3.connect("attendance.db")
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+        cursor.execute("SELECT * FROM users WHERE username=?", (username,))
         user_data = cursor.fetchone()
         conn.close()
 
-        if user_data:
+        if user_data and check_password_hash(user_data[2], password):
             user = User(user_data[0], user_data[1])
             login_user(user)
             flash("Login successful!", "success")
@@ -448,24 +503,26 @@ def login():
 
     return render_template("login.html")
 
-
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
         username = request.form["username"]
         password = request.form["password"]
+        hashed = generate_password_hash(password)
 
-        conn = sqlite3.connect("attendance.db")
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
-        conn.commit()
-        conn.close()
-
-        flash("Registration successful! Please login.", "success")
-        return redirect(url_for("login"))
+        try:
+            cursor.execute("INSERT INTO users (username, password) VALUES (?,?)", (username, hashed))
+            conn.commit()
+            flash("Registration successful! Please login.", "success")
+            return redirect(url_for("login"))
+        except sqlite3.IntegrityError:
+            flash("Username already taken.", "error")
+        finally:
+            conn.close()
 
     return render_template("register.html")
-
 
 @app.route("/logout")
 @login_required
@@ -474,8 +531,7 @@ def logout():
     flash("Logged out successfully", "info")
     return redirect(url_for("login"))
 
-
 if __name__ == '__main__':
-    with app.app_context():
-        init_db()
+    # Ensure DB initialized when run directly
+    init_db()
     app.run(host='0.0.0.0', port=5000)
