@@ -157,6 +157,6 @@ GROQ_API_KEY=YOUR_GROQ_API_KEY
 # 👨‍💻 Author
 
 **Mohd Shahnawaz**
-If you want to login user name (mohd123)
-                          password(111)
+If you want to login user name (husban@123)
+                          password(112233)
 AI Attendance Assistant – Internship Project
